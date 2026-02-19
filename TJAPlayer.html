@@ -14,7 +14,12 @@
   .pad{background:#ffffff05;border:1px solid #ffffff14}
 </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js">// ===== ZIP Loader =====
-document.getElementById('zipFile').onchange=async e=>{
+const zipInput=document.getElementById('zipFile');
+zipInput.addEventListener('click',e=>{ e.target.value=null; });
+zipInput.onchange=async e=>{
+  status.textContent='ZIPを読み込み中…';
+  try{
+    await audioCtx.resume();
   const file=e.target.files[0];
   if(!file) return;
   const zip=await JSZip.loadAsync(file);
@@ -46,16 +51,17 @@ document.getElementById('zipFile').onchange=async e=>{
   if(audioName){
     const blob=await zip.files[audioName].async('blob');
     await loadAudio(new File([blob],audioName));
-    status.textContent='ZIP読み込み完了';
+    status.textContent='ZIP読み込み完了！STARTを押してください';
   }else{
-    status.textContent='譜面は読み込めたが音源が見つかりません';
+    status.textContent='譜面は読めましたが音源が見つかりません（WAVE: のファイル名を確認）';
   }
+  }catch(err){ console.error(err); status.textContent='読み込みに失敗しました（ZIP形式か容量を確認）'; }
 };
 </script>
 </head>
 <body>
 <div id="ui">
-  <input type="file" id="zipFile" accept=".zip" />
+  <input type="file" id="zipFile" accept=".zip,application/zip,application/x-zip-compressed" />
   <button id="startBtn">START</button>
   <span id="status">ZIPを選択してください</span>
 </div>
