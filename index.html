@@ -2,253 +2,181 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>TJA Mobile Player (Dual Supported)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>TJA Player (ZIP only)</title>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
-  html,body{margin:0;padding:0;background:#111;color:#fff;font-family:sans-serif;overflow:hidden}
-  #ui{position:fixed;top:0;left:0;right:0;background:#000a;padding:8px;z-index:10}
-  #ui input{color:#fff}
-  canvas{position:absolute;top:0;left:0}
-  #touch{position:fixed;bottom:0;left:0;right:0;height:45vh;display:grid;grid-template-columns:1fr 1fr;z-index:5}
-  .laneTouch{display:grid;grid-template-columns:1fr 1fr}
-  .pad{background:#ffffff05;border:1px solid #ffffff14}
+  body{margin:0;background:#111;color:white;font-family:sans-serif;text-align:center}
+  #top{padding:12px;background:#222;position:sticky;top:0}
+  canvas{background:#000;display:block;margin:0 auto}
+  button,input{font-size:16px;margin:6px}
+  #status{font-size:14px;color:#8ef}
 </style>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js">// ===== ZIP Loader =====
-const zipInput=document.getElementById('zipFile');
-zipInput.addEventListener('click',e=>{ e.target.value=null; });
-zipInput.onchange=async e=>{
-  status.textContent='ZIPを読み込み中…';
-  try{
-    await audioCtx.resume();
-  const file=e.target.files[0];
-  if(!file) return;
-  const zip=await JSZip.loadAsync(file);
-
-  let tjaName=null;
-  for(const name of Object.keys(zip.files)){
-    if(name.toLowerCase().endsWith('.tja')){tjaName=name;break;}
-  }
-  if(!tjaName){status.textContent='ZIPに.tjaがありません';return;}
-
-  const tjaText=await zip.files[tjaName].async('text');
-  parseTJA(tjaText);
-
-  let audioName=null;
-  const m=tjaText.match(/WAVE\s*:\s*(.+)/i);
-  if(m){
-    let target=m[1].trim();
-    if(zip.files[target]) audioName=target;
-    else{
-      const base=target.split(/[\\/]/).pop().toLowerCase();
-      audioName=Object.keys(zip.files).find(n=>n.split('/').pop().toLowerCase()===base);
-    }
-  }
-
-  if(!audioName){
-    audioName=Object.keys(zip.files).find(n=>/\.(ogg|mp3|wav|m4a)$/i.test(n));
-  }
-
-  if(audioName){
-    const blob=await zip.files[audioName].async('blob');
-    await loadAudio(new File([blob],audioName));
-    status.textContent='ZIP読み込み完了！STARTを押してください';
-  }else{
-    status.textContent='譜面は読めましたが音源が見つかりません（WAVE: のファイル名を確認）';
-  }
-  }catch(err){ console.error(err); status.textContent='読み込みに失敗しました（ZIP形式か容量を確認）'; }
-};
-</script>
 </head>
 <body>
-<div id="ui">
-  <input type="file" id="zipFile" accept=".zip,application/zip,application/x-zip-compressed" />
+
+<div id="top">
+  <input type="file" id="zipFile" accept=".zip,application/zip,application/x-zip-compressed">
   <button id="startBtn">START</button>
-  <span id="status">ZIPを選択してください</span>
+  <div id="status">ZIPを選択してください</div>
 </div>
 
-<canvas id="game"></canvas>
-
-<div id="touch">
-  <div class="laneTouch" id="lane1">
-    <div class="pad" data-lane="0" data-type="don"></div>
-    <div class="pad" data-lane="0" data-type="kat"></div>
-  </div>
-  <div class="laneTouch" id="lane2">
-    <div class="pad" data-lane="1" data-type="don"></div>
-    <div class="pad" data-lane="1" data-type="kat"></div>
-  </div>
-</div>
+<canvas id="game" width="960" height="360"></canvas>
 
 <script>
-// ================= Canvas =================
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-function resize(){
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-}
-window.addEventListener('resize',resize);
-resize();
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
+const startBtn = document.getElementById("startBtn");
 
-// ================= Audio =================
 let audioCtx = new (window.AudioContext||window.webkitAudioContext)();
 let audioBuffer=null;
+let bpm=120;
+let offset=0;
+let notes=[];
 let startTime=0;
 let playing=false;
 
-async function loadAudio(file){
-  const arr=await file.arrayBuffer();
-  audioBuffer=await audioCtx.decodeAudioData(arr);
+/* ================= ZIP LOAD ================= */
+
+document.getElementById("zipFile").addEventListener("change", async e=>{
+  try{
+    status.textContent="ZIPを解析中…";
+    const file=e.target.files[0];
+    const zip=await JSZip.loadAsync(file);
+
+    // TJA探す
+    let tjaFile=null;
+    zip.forEach((path,entry)=>{
+      if(path.toLowerCase().endsWith(".tja")) tjaFile=entry;
+    });
+    if(!tjaFile){ status.textContent="TJAが見つかりません"; return; }
+
+    const tjaText=await tjaFile.async("string");
+
+    // ヘッダ解析
+    let waveFile=null;
+    const lines=tjaText.split(/\r?\n/);
+    for(let l of lines){
+      if(l.startsWith("WAVE:")) waveFile=l.split(":")[1].trim();
+      if(l.startsWith("BPM:")) bpm=parseFloat(l.split(":")[1]);
+      if(l.startsWith("OFFSET:")) offset=parseFloat(l.split(":")[1]);
+    }
+
+    /* ===== COURSE解析 ===== */
+    function parseCourses(text){
+      const lines=text.split(/\r?\n/);
+      let courses=[];
+      let current=null;
+      let inScore=false;
+
+      for(let line of lines){
+        line=line.trim();
+
+        if(line.startsWith("COURSE:")){
+          if(current) courses.push(current);
+          current={course:line.split(":")[1].trim().toLowerCase(),score:""};
+        }
+
+        if(line==="#START"){ inScore=true; continue; }
+        if(line==="#END"){ inScore=false; continue; }
+
+        if(inScore && current) current.score+=line+"\n";
+      }
+      if(current) courses.push(current);
+      return courses;
+    }
+
+    const courses=parseCourses(tjaText);
+    if(courses.length===0){ status.textContent="譜面がありません"; return; }
+
+    // Oni優先
+    let selected=courses.find(c=>c.course==="oni");
+    if(!selected) selected=courses[courses.length-1];
+
+    parseNotes(selected.score);
+
+    /* ===== 音源読み込み ===== */
+    if(!waveFile){ status.textContent="WAVE指定がありません"; return; }
+
+    let audioEntry=null;
+    zip.forEach((path,entry)=>{
+      if(path.toLowerCase().endsWith(waveFile.toLowerCase())) audioEntry=entry;
+    });
+    if(!audioEntry){ status.textContent="音源ファイルがZIP内にありません"; return; }
+
+    const array=await audioEntry.async("arraybuffer");
+    audioBuffer=await audioCtx.decodeAudioData(array);
+
+    status.textContent="読み込み完了！STARTを押してください";
+  }catch(err){
+    console.error(err);
+    status.textContent="読み込み失敗（ZIP形式を確認）";
+  }
+});
+
+/* ================= 譜面解析 ================= */
+function parseNotes(score){
+  notes=[];
+  let time=0;
+  const beat=60/bpm;
+
+  const lines=score.split(/\r?\n/);
+  for(let line of lines){
+    line=line.trim();
+    if(line.length===0) continue;
+    if(line.startsWith("#")) continue;
+
+    const len=line.length;
+    for(let i=0;i<len;i++){
+      const n=line[i];
+      if(n==="1"||n==="2"||n==="3"||n==="4"){
+        notes.push({t:time+(beat*4/len)*i,type:n});
+      }
+    }
+    time+=beat*4;
+  }
 }
 
-function playAudio(offset=0){
+/* ================= 再生 ================= */
+startBtn.onclick=()=>{
+  if(!audioBuffer){ status.textContent="先にZIPを読み込んでください"; return; }
   const src=audioCtx.createBufferSource();
   src.buffer=audioBuffer;
   src.connect(audioCtx.destination);
-  startTime=audioCtx.currentTime-offset;
-  src.start(0,offset);
+  startTime=audioCtx.currentTime+0.1-offset;
+  src.start(startTime);
   playing=true;
-}
+  requestAnimationFrame(loop);
+};
 
-function songTime(){
-  if(!playing) return 0;
-  return audioCtx.currentTime-startTime;
-}
+/* ================= 描画 ================= */
+function loop(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
 
-// ================= TJA Parser =================
-let lanes=[[],[]];
-let bpm=120;
-let offset=0;
+  const now=audioCtx.currentTime-startTime;
+  const laneY=180;
+  const hitX=200;
 
-function parseTJA(text){
-  lanes=[[],[]];
-  let currentLane=0;
-  let measureTime=0;
-  let inScore=false;
-  let beat=4;
-  let scroll=1;
+  // 判定枠
+  ctx.fillStyle="white";
+  ctx.beginPath();
+  ctx.arc(hitX,laneY,30,0,Math.PI*2);
+  ctx.fill();
 
-  const lines=text.split(/\r?\n/);
-  for(let raw of lines){
-    const line=raw.trim();
-    if(line.startsWith('BPM:')) bpm=parseFloat(line.split(':')[1]);
-    if(line.startsWith('OFFSET:')) offset=parseFloat(line.split(':')[1]);
-
-    if(line==='#START') {inScore=true;currentLane=0;measureTime=0;continue;}
-    if(line==='#START P2'||line==='#START 2P'){inScore=true;currentLane=1;measureTime=0;continue;}
-    if(line==='#END'){inScore=false;continue;}
-    if(!inScore) continue;
-
-    if(line.startsWith('#MEASURE')){
-      const m=line.split(' ')[1].split('/');
-      beat=4*(parseFloat(m[0])/parseFloat(m[1]));
-      continue;
-    }
-
-    if(line.endsWith(',')){
-      const notes=line.slice(0,-1);
-      const beatLen=(60/bpm)*(4/beat);
-      const step=beatLen/notes.length;
-      for(let i=0;i<notes.length;i++){
-        const n=notes[i];
-        if(n==='0') continue;
-        lanes[currentLane].push({
-          time:measureTime+i*step-offset,
-          type:n
-        });
-      }
-      measureTime+=beatLen;
-    }
-  }
-}
-
-// ================= Gameplay =================
-const hitWindow=0.09;
-const notesHit=[[],[]];
-const score=[0,0];
-
-function judge(lane,type){
-  const t=songTime();
-  const list=lanes[lane];
-  for(let i=0;i<list.length;i++){
-    const n=list[i];
-    if(notesHit[lane][i]) continue;
-    if(Math.abs(n.time-t)<hitWindow){
-      notesHit[lane][i]=true;
-      score[lane]+=100;
-      return;
-    }
-  }
-}
-
-// Touch
-for(const pad of document.querySelectorAll('.pad')){
-  pad.addEventListener('touchstart',e=>{
-    e.preventDefault();
-    const lane=parseInt(pad.dataset.lane);
-    const type=pad.dataset.type;
-    judge(lane,type);
-  });
-}
-
-// Keyboard (debug PC)
-document.addEventListener('keydown',e=>{
-  if(e.key==='f') judge(0,'don');
-  if(e.key==='j') judge(0,'kat');
-  if(e.key==='d') judge(1,'don');
-  if(e.key==='k') judge(1,'kat');
-});
-
-// ================= Render =================
-function drawLane(y,lane){
-  ctx.fillStyle='#222';
-  ctx.fillRect(0,y,canvas.width,120);
-
-  const t=songTime();
-  for(const n of lanes[lane]){
-    const dt=n.time-t;
-    const x=canvas.width- dt*400;
+  for(let n of notes){
+    const dt=n.t-now;
+    const x=hitX+dt*300;
     if(x<-50||x>canvas.width+50) continue;
 
+    ctx.fillStyle=(n.type==="1"||n.type==="3")?"red":"blue";
     ctx.beginPath();
-    ctx.arc(x,y+60,25,0,Math.PI*2);
-    ctx.fillStyle=(n.type==='1'||n.type==='3')?'#ff4a4a':'#4aa3ff';
+    ctx.arc(x,laneY,20,0,Math.PI*2);
     ctx.fill();
   }
 
-  // hit circle
-  ctx.beginPath();
-  ctx.arc(150,y+60,30,0,Math.PI*2);
-  ctx.strokeStyle='#fff';
-  ctx.lineWidth=4;
-  ctx.stroke();
+  if(playing) requestAnimationFrame(loop);
 }
-
-function render(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  drawLane(canvas.height/2-140,0);
-  drawLane(canvas.height/2+20,1);
-
-  ctx.fillStyle='#fff';
-  ctx.font='20px sans-serif';
-  ctx.fillText('P1 Score: '+score[0],20,30);
-  ctx.fillText('P2 Score: '+score[1],20,60);
-
-  requestAnimationFrame(render);
-}
-render();
-
-// ================= UI =================
-const status=document.getElementById('status');
-
-
-
-
-
-document.getElementById('startBtn').onclick=()=>{
-  audioCtx.resume();
-  playAudio(0);
-};
 </script>
 </body>
 </html>
