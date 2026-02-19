@@ -16,136 +16,237 @@
 <body>
 
 <div id="top">
-  <input type="file" id="zipFile" accept=".zip,application/zip,application/x-zip-compressed">
-  <button id="startBtn">START</button>
+  <input type="file" id="zipFile" accept=".zip,application/zip">
+  <button id="startBtn" disabled>START</button>
   <div id="status">ZIPを選択してください</div>
 </div>
 
-<canvas id="game" width="960" height="360"></canvas>
+<canvas id="game" width="960" height="540"></canvas>
 
 <script>
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 const status = document.getElementById("status");
 const startBtn = document.getElementById("startBtn");
+const zipInput = document.getElementById("zipFile");
 
 let audioCtx = new (window.AudioContext||window.webkitAudioContext)();
 let audioBuffer=null;
 let bpm=120;
 let offset=0;
-let notes=[];
+let notesP1=[], notesP2=[];
 let startTime=0;
 let playing=false;
 
-/* ================= ZIP LOAD ================= */
+// 起動確認
+if (typeof JSZip === 'undefined') {
+  status.textContent = 'JSZipが読み込めていません（通信ブロックの可能性）';
+} else {
+  status.textContent = 'スクリプト起動OK。ZIPを選択してください';
+}
+zipInput.onclick = ()=>{ status.textContent='ファイル選択ダイアログを開きました'; };
 
-document.getElementById("zipFile").addEventListener("change", async e=>{
-  try{
-    status.textContent="ZIPを解析中…";
-    const file=e.target.files[0];
-    const zip=await JSZip.loadAsync(file);
+/* ================= COURSE解析 ================= */
+function parseCourses(text){
+  const lines=text.split(/
+?
+/);
+  let courses=[];
+  let current=null;
+  let inScore=false;
+  let currentPart=null; // "p1" or "p2"
 
-    // TJA探す
-    let tjaFile=null;
-    zip.forEach((path,entry)=>{
-      if(path.toLowerCase().endsWith(".tja")) tjaFile=entry;
-    });
-    if(!tjaFile){ status.textContent="TJAが見つかりません"; return; }
+  for(let raw of lines){
+    let line=raw.trim();
 
-    const tjaText=await tjaFile.async("string");
-
-    // ヘッダ解析
-    let waveFile=null;
-    const lines=tjaText.split(/\r?\n/);
-    for(let l of lines){
-      if(l.startsWith("WAVE:")) waveFile=l.split(":")[1].trim();
-      if(l.startsWith("BPM:")) bpm=parseFloat(l.split(":")[1]);
-      if(l.startsWith("OFFSET:")) offset=parseFloat(l.split(":")[1]);
-    }
-
-    /* ===== COURSE解析 ===== */
-    function parseCourses(text){
-      const lines=text.split(/\r?\n/);
-      let courses=[];
-      let current=null;
-      let inScore=false;
-
-      for(let line of lines){
-        line=line.trim();
-
-        if(line.startsWith("COURSE:")){
-          if(current) courses.push(current);
-          current={course:line.split(":")[1].trim().toLowerCase(),score:""};
-        }
-
-        if(line==="#START"){ inScore=true; continue; }
-        if(line==="#END"){ inScore=false; continue; }
-
-        if(inScore && current) current.score+=line+"\n";
-      }
+    if(line.startsWith("COURSE:")){
       if(current) courses.push(current);
-      return courses;
+      current={course:line.split(":")[1].trim().toLowerCase(),p1:"",p2:""};
+      inScore=false;
+      currentPart=null;
+      continue;
     }
 
-    const courses=parseCourses(tjaText);
-    if(courses.length===0){ status.textContent="譜面がありません"; return; }
+    if(line.startsWith("#START")){
+      inScore=true;
+      if(line.toUpperCase().includes("P2")) currentPart="p2";
+      else currentPart="p1";
+      continue;
+    }
 
-    // Oni優先
-    let selected=courses.find(c=>c.course==="oni");
-    if(!selected) selected=courses[courses.length-1];
+    if(line==="#END"){
+      inScore=false;
+      currentPart=null;
+      continue;
+    }
 
-    parseNotes(selected.score);
-
-    /* ===== 音源読み込み ===== */
-    if(!waveFile){ status.textContent="WAVE指定がありません"; return; }
-
-    let audioEntry=null;
-    zip.forEach((path,entry)=>{
-      if(path.toLowerCase().endsWith(waveFile.toLowerCase())) audioEntry=entry;
-    });
-    if(!audioEntry){ status.textContent="音源ファイルがZIP内にありません"; return; }
-
-    const array=await audioEntry.async("arraybuffer");
-    audioBuffer=await audioCtx.decodeAudioData(array);
-
-    status.textContent="読み込み完了！STARTを押してください";
-  }catch(err){
-    console.error(err);
-    status.textContent="読み込み失敗（ZIP形式を確認）";
+    if(inScore && current && currentPart){
+      if(currentPart==="p1") current.p1+=line+"
+";
+      if(currentPart==="p2") current.p2+=line+"
+";
+    }
   }
-});
+
+  if(current) courses.push(current);
+  return courses;
+}
 
 /* ================= 譜面解析 ================= */
 function parseNotes(score){
-  notes=[];
+  let result=[];
   let time=0;
   const beat=60/bpm;
 
-  const lines=score.split(/\r?\n/);
+  const lines=score.split(/
+?
+/);
   for(let line of lines){
     line=line.trim();
-    if(line.length===0) continue;
-    if(line.startsWith("#")) continue;
+    if(!line||line.startsWith("#")) continue;
 
     const len=line.length;
     for(let i=0;i<len;i++){
       const n=line[i];
       if(n==="1"||n==="2"||n==="3"||n==="4"){
-        notes.push({t:time+(beat*4/len)*i,type:n});
+        result.push({t:time+(beat*4/len)*i,type:n});
       }
     }
     time+=beat*4;
   }
+  return result;
 }
+
+/* ================= ZIP LOAD ================= */
+zipInput.onchange = async (e)=>{
+  try{
+    startBtn.disabled=true;
+    notesP1=[]; notesP2=[];
+
+    const file = e.target.files && e.target.files[0];
+    if(!file){ status.textContent="ZIPを選択してください"; return; }
+
+    status.textContent = `選択: ${file.name} / 解析中…`;
+
+    const buf = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(buf);
+
+    // ===== TJA探索 =====
+    let tjaEntry=null;
+    zip.forEach((path,entry)=>{
+      if(!tjaEntry && path.toLowerCase().endsWith('.tja')) tjaEntry=entry;
+    });
+    if(!tjaEntry){ status.textContent="TJAが見つかりません"; return; }
+
+    const tjaText = await tjaEntry.async('string');
+
+    // ヘッダ解析
+    let waveFile=null;
+    const lines=tjaText.split(/
+?
+/);
+    for(let l of lines){
+      if(l.startsWith('WAVE:')) waveFile=l.split(':')[1].trim();
+      if(l.startsWith('BPM:')) bpm=parseFloat(l.split(':')[1]);
+      if(l.startsWith('OFFSET:')) offset=parseFloat(l.split(':')[1]);
+    }
+
+    const courses=parseCourses(tjaText);
+    if(courses.length===0){ status.textContent='譜面がありません'; return; }
+
+    let selected=courses.find(c=>c.course==='oni');
+    if(!selected) selected=courses[courses.length-1];
+
+    notesP1 = parseNotes(selected.p1||"");
+    notesP2 = parseNotes(selected.p2||"");
+
+    // ===== 音源探索（同フォルダ優先→末尾一致） =====
+    if(!waveFile){ status.textContent='WAVE指定がありません'; return; }
+
+    const tjaPath = tjaEntry.name || '';
+    const baseDir = tjaPath.includes('/') ? tjaPath.substring(0, tjaPath.lastIndexOf('/')+1) : '';
+
+    let audioEntry = zip.file(baseDir + waveFile);
+    if(!audioEntry){
+      zip.forEach((path,entry)=>{
+        if(!audioEntry && path.toLowerCase().endsWith(waveFile.toLowerCase())) audioEntry=entry;
+      });
+    }
+    if(!audioEntry){ status.textContent='音源ファイルがZIP内にありません'; return; }
+
+    const array=await audioEntry.async('arraybuffer');
+    audioBuffer=await audioCtx.decodeAudioData(array);
+
+    status.textContent='読み込み完了！STARTを押してください';
+    startBtn.disabled=false;
+  }catch(err){
+    console.error(err);
+    status.textContent='読み込み失敗（ZIP形式や中身を確認）';
+    startBtn.disabled=true;
+  }
+};
+    if(!tjaEntry){ status.textContent="TJAが見つかりません"; return; }
+
+    const tjaText = await tjaEntry.async('string');
+
+    // ヘッダ解析
+    let waveFile=null;
+    const lines=tjaText.split(/
+?
+/);
+    for(let l of lines){
+      if(l.startsWith('WAVE:')) waveFile=l.split(':')[1].trim();
+      if(l.startsWith('BPM:')) bpm=parseFloat(l.split(':')[1]);
+      if(l.startsWith('OFFSET:')) offset=parseFloat(l.split(':')[1]);
+    }
+
+    const courses=parseCourses(tjaText);
+    if(courses.length===0){ status.textContent='譜面がありません'; return; }
+
+    let selected=courses.find(c=>c.course==='oni');
+    if(!selected) selected=courses[courses.length-1];
+
+    notesP1 = parseNotes(selected.p1||"");
+    notesP2 = parseNotes(selected.p2||"");
+
+    // ===== 音源探索（同フォルダ優先→末尾一致） =====
+    if(!waveFile){ status.textContent='WAVE指定がありません'; return; }
+
+    const tjaPath = tjaEntry.name || '';
+    const baseDir = tjaPath.includes('/') ? tjaPath.substring(0, tjaPath.lastIndexOf('/')+1) : '';
+
+    let audioEntry = zip.file(baseDir + waveFile);
+    if(!audioEntry){
+      zip.forEach((path,entry)=>{
+        if(!audioEntry && path.toLowerCase().endsWith(waveFile.toLowerCase())) audioEntry=entry;
+      });
+    }
+    if(!audioEntry){ status.textContent='音源ファイルがZIP内にありません'; return; }
+
+    const array=await audioEntry.async('arraybuffer');
+    audioBuffer=await audioCtx.decodeAudioData(array);
+
+    status.textContent='読み込み完了！STARTを押してください';
+    startBtn.disabled=false;
+  }catch(err){
+    console.error(err);
+    status.textContent='読み込み失敗（ZIP形式や中身を確認）';
+    startBtn.disabled=true;
+  }
+});
 
 /* ================= 再生 ================= */
 startBtn.onclick=()=>{
   if(!audioBuffer){ status.textContent="先にZIPを読み込んでください"; return; }
+
   const src=audioCtx.createBufferSource();
   src.buffer=audioBuffer;
   src.connect(audioCtx.destination);
-  startTime=audioCtx.currentTime+0.1-offset;
+
+  // 音声はそのまま再生（オフセットは譜面側で調整）
+  startTime=audioCtx.currentTime+0.1;
   src.start(startTime);
+
   playing=true;
   requestAnimationFrame(loop);
 };
@@ -154,26 +255,49 @@ startBtn.onclick=()=>{
 function loop(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
 
-  const now=audioCtx.currentTime-startTime;
-  const laneY=180;
-  const hitX=200;
+  // 再生経過時間 + OFFSET補正（TJA仕様）
+  const now=(audioCtx.currentTime-startTime)+offset;
+  const hitX=220;
+  const laneY1=150; // P1
+  const laneY2=390; // P2
 
-  // 判定枠
-  ctx.fillStyle="white";
-  ctx.beginPath();
-  ctx.arc(hitX,laneY,30,0,Math.PI*2);
-  ctx.fill();
+  function drawLane(y,label){
+    ctx.fillStyle="#1a1a1a";
+    ctx.fillRect(0,y-50,canvas.width,100);
 
-  for(let n of notes){
-    const dt=n.t-now;
-    const x=hitX+dt*300;
-    if(x<-50||x>canvas.width+50) continue;
+    ctx.strokeStyle="#ffffff";
+    ctx.lineWidth=4;
+    ctx.strokeRect(0,y-50,canvas.width,100);
 
-    ctx.fillStyle=(n.type==="1"||n.type==="3")?"red":"blue";
+    ctx.fillStyle="white";
     ctx.beginPath();
-    ctx.arc(x,laneY,20,0,Math.PI*2);
+    ctx.arc(hitX,y,30,0,Math.PI*2);
     ctx.fill();
+
+    ctx.fillStyle="#fff";
+    ctx.font="20px sans-serif";
+    ctx.fillText(label,20,y-60);
   }
+
+  drawLane(laneY1,"P1");
+  drawLane(laneY2,"P2");
+
+  function drawNotes(noteArray, laneY, now){
+    for(let n of noteArray){
+      const dt=n.t-now;
+      const x=hitX+dt*300;
+      if(x<-50||x>canvas.width+50) continue;
+
+      const color=(n.type==="1"||n.type==="3")?"red":"blue";
+      ctx.fillStyle=color;
+      ctx.beginPath();
+      ctx.arc(x,laneY,20,0,Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  drawNotes(notesP1, laneY1, now);
+  drawNotes(notesP2, laneY2, now);
 
   if(playing) requestAnimationFrame(loop);
 }
