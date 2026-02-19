@@ -55,11 +55,9 @@ document.getElementById('zipFile').onchange=async e=>{
 </head>
 <body>
 <div id="ui">
-  <input type="file" id="tjaFile" accept=".tja" />
-  <input type="file" id="audioFile" accept="audio/*" />
   <input type="file" id="zipFile" accept=".zip" />
   <button id="startBtn">START</button>
-  <span id="status">No chart loaded</span>
+  <span id="status">ZIPを選択してください</span>
 </div>
 
 <canvas id="game"></canvas>
@@ -237,17 +235,9 @@ render();
 // ================= UI =================
 const status=document.getElementById('status');
 
-document.getElementById('tjaFile').onchange=async e=>{
-  const file=e.target.files[0];
-  const text=await file.text();
-  parseTJA(text);
-  status.textContent='TJA Loaded';
-};
 
-document.getElementById('audioFile').onchange=async e=>{
-  await loadAudio(e.target.files[0]);
-  status.textContent+=' | Audio Loaded';
-};
+
+
 
 document.getElementById('startBtn').onclick=()=>{
   audioCtx.resume();
