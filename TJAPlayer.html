@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>TJA Mobile Player (Dual Supported)</title>
+<style>
+  html,body{margin:0;padding:0;background:#111;color:#fff;font-family:sans-serif;overflow:hidden}
+  #ui{position:fixed;top:0;left:0;right:0;background:#000a;padding:8px;z-index:10}
+  #ui input{color:#fff}
+  canvas{position:absolute;top:0;left:0}
+  #touch{position:fixed;bottom:0;left:0;right:0;height:45vh;display:grid;grid-template-columns:1fr 1fr;z-index:5}
+  .laneTouch{display:grid;grid-template-columns:1fr 1fr}
+  .pad{background:#ffffff05;border:1px solid #ffffff14}
+</style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js">// ===== ZIP Loader =====
+document.getElementById('zipFile').onchange=async e=>{
+  const file=e.target.files[0];
+  if(!file) return;
+  const zip=await JSZip.loadAsync(file);
+
+  let tjaName=null;
+  for(const name of Object.keys(zip.files)){
+    if(name.toLowerCase().endsWith('.tja')){tjaName=name;break;}
+  }
+  if(!tjaName){status.textContent='ZIPに.tjaがありません';return;}
+
+  const tjaText=await zip.files[tjaName].async('text');
+  parseTJA(tjaText);
+
+  let audioName=null;
+  const m=tjaText.match(/WAVE\s*:\s*(.+)/i);
+  if(m){
+    let target=m[1].trim();
+    if(zip.files[target]) audioName=target;
+    else{
+      const base=target.split(/[\\/]/).pop().toLowerCase();
+      audioName=Object.keys(zip.files).find(n=>n.split('/').pop().toLowerCase()===base);
+    }
+  }
+
+  if(!audioName){
+    audioName=Object.keys(zip.files).find(n=>/\.(ogg|mp3|wav|m4a)$/i.test(n));
+  }
+
+  if(audioName){
+    const blob=await zip.files[audioName].async('blob');
+    await loadAudio(new File([blob],audioName));
+    status.textContent='ZIP読み込み完了';
+  }else{
+    status.textContent='譜面は読み込めたが音源が見つかりません';
+  }
+};
+</script>
+</head>
+<body>
+<div id="ui">
+  <input type="file" id="tjaFile" accept=".tja" />
+  <input type="file" id="audioFile" accept="audio/*" />
+  <input type="file" id="zipFile" accept=".zip" />
+  <button id="startBtn">START</button>
+  <span id="status">No chart loaded</span>
+</div>
+
+<canvas id="game"></canvas>
+
+<div id="touch">
+  <div class="laneTouch" id="lane1">
+    <div class="pad" data-lane="0" data-type="don"></div>
+    <div class="pad" data-lane="0" data-type="kat"></div>
+  </div>
+  <div class="laneTouch" id="lane2">
+    <div class="pad" data-lane="1" data-type="don"></div>
+    <div class="pad" data-lane="1" data-type="kat"></div>
+  </div>
+</div>
+
+<script>
+// ================= Canvas =================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize',resize);
+resize();
+
+// ================= Audio =================
+let audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+let audioBuffer=null;
+let startTime=0;
+let playing=false;
+
+async function loadAudio(file){
+  const arr=await file.arrayBuffer();
+  audioBuffer=await audioCtx.decodeAudioData(arr);
+}
+
+function playAudio(offset=0){
+  const src=audioCtx.createBufferSource();
+  src.buffer=audioBuffer;
+  src.connect(audioCtx.destination);
+  startTime=audioCtx.currentTime-offset;
+  src.start(0,offset);
+  playing=true;
+}
+
+function songTime(){
+  if(!playing) return 0;
+  return audioCtx.currentTime-startTime;
+}
+
+// ================= TJA Parser =================
+let lanes=[[],[]];
+let bpm=120;
+let offset=0;
+
+function parseTJA(text){
+  lanes=[[],[]];
+  let currentLane=0;
+  let measureTime=0;
+  let inScore=false;
+  let beat=4;
+  let scroll=1;
+
+  const lines=text.split(/\r?\n/);
+  for(let raw of lines){
+    const line=raw.trim();
+    if(line.startsWith('BPM:')) bpm=parseFloat(line.split(':')[1]);
+    if(line.startsWith('OFFSET:')) offset=parseFloat(line.split(':')[1]);
+
+    if(line==='#START') {inScore=true;currentLane=0;measureTime=0;continue;}
+    if(line==='#START P2'||line==='#START 2P'){inScore=true;currentLane=1;measureTime=0;continue;}
+    if(line==='#END'){inScore=false;continue;}
+    if(!inScore) continue;
+
+    if(line.startsWith('#MEASURE')){
+      const m=line.split(' ')[1].split('/');
+      beat=4*(parseFloat(m[0])/parseFloat(m[1]));
+      continue;
+    }
+
+    if(line.endsWith(',')){
+      const notes=line.slice(0,-1);
+      const beatLen=(60/bpm)*(4/beat);
+      const step=beatLen/notes.length;
+      for(let i=0;i<notes.length;i++){
+        const n=notes[i];
+        if(n==='0') continue;
+        lanes[currentLane].push({
+          time:measureTime+i*step-offset,
+          type:n
+        });
+      }
+      measureTime+=beatLen;
+    }
+  }
+}
+
+// ================= Gameplay =================
+const hitWindow=0.09;
+const notesHit=[[],[]];
+const score=[0,0];
+
+function judge(lane,type){
+  const t=songTime();
+  const list=lanes[lane];
+  for(let i=0;i<list.length;i++){
+    const n=list[i];
+    if(notesHit[lane][i]) continue;
+    if(Math.abs(n.time-t)<hitWindow){
+      notesHit[lane][i]=true;
+      score[lane]+=100;
+      return;
+    }
+  }
+}
+
+// Touch
+for(const pad of document.querySelectorAll('.pad')){
+  pad.addEventListener('touchstart',e=>{
+    e.preventDefault();
+    const lane=parseInt(pad.dataset.lane);
+    const type=pad.dataset.type;
+    judge(lane,type);
+  });
+}
+
+// Keyboard (debug PC)
+document.addEventListener('keydown',e=>{
+  if(e.key==='f') judge(0,'don');
+  if(e.key==='j') judge(0,'kat');
+  if(e.key==='d') judge(1,'don');
+  if(e.key==='k') judge(1,'kat');
+});
+
+// ================= Render =================
+function drawLane(y,lane){
+  ctx.fillStyle='#222';
+  ctx.fillRect(0,y,canvas.width,120);
+
+  const t=songTime();
+  for(const n of lanes[lane]){
+    const dt=n.time-t;
+    const x=canvas.width- dt*400;
+    if(x<-50||x>canvas.width+50) continue;
+
+    ctx.beginPath();
+    ctx.arc(x,y+60,25,0,Math.PI*2);
+    ctx.fillStyle=(n.type==='1'||n.type==='3')?'#ff4a4a':'#4aa3ff';
+    ctx.fill();
+  }
+
+  // hit circle
+  ctx.beginPath();
+  ctx.arc(150,y+60,30,0,Math.PI*2);
+  ctx.strokeStyle='#fff';
+  ctx.lineWidth=4;
+  ctx.stroke();
+}
+
+function render(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawLane(canvas.height/2-140,0);
+  drawLane(canvas.height/2+20,1);
+
+  ctx.fillStyle='#fff';
+  ctx.font='20px sans-serif';
+  ctx.fillText('P1 Score: '+score[0],20,30);
+  ctx.fillText('P2 Score: '+score[1],20,60);
+
+  requestAnimationFrame(render);
+}
+render();
+
+// ================= UI =================
+const status=document.getElementById('status');
+
+document.getElementById('tjaFile').onchange=async e=>{
+  const file=e.target.files[0];
+  const text=await file.text();
+  parseTJA(text);
+  status.textContent='TJA Loaded';
+};
+
+document.getElementById('audioFile').onchange=async e=>{
+  await loadAudio(e.target.files[0]);
+  status.textContent+=' | Audio Loaded';
+};
+
+document.getElementById('startBtn').onclick=()=>{
+  audioCtx.resume();
+  playAudio(0);
+};
+</script>
+</body>
+</html>
